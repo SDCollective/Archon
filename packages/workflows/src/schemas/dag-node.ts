@@ -164,6 +164,8 @@ export const dagNodeBaseSchema = z.object({
   fallbackModel: z.string().min(1).optional(),
   betas: z.array(z.string().min(1)).nonempty("'betas' must be a non-empty array").optional(),
   sandbox: sandboxSettingsSchema.optional(),
+  /** Named background-agent persona for the claude-bg provider's `--agent` flag (ignored by other providers). */
+  bgAgent: z.string().min(1).optional(),
   // Opt out of resume caching: when true, this node re-runs on resume even if a
   // prior run completed it successfully. Use for producers whose exit code does
   // not capture output validity (e.g. bash that writes a file the consumer parses).
@@ -345,6 +347,7 @@ export const BASH_NODE_AI_FIELDS: readonly string[] = [
   'fallbackModel',
   'betas',
   'sandbox',
+  'bgAgent',
 ];
 
 /** AI-specific fields that are meaningless on script nodes — same as bash nodes */
@@ -356,7 +359,7 @@ export const SCRIPT_NODE_AI_FIELDS: readonly string[] = BASH_NODE_AI_FIELDS;
  * forwards them to each iteration's AI call (see dag-executor.ts:2602-2648).
  */
 export const LOOP_NODE_AI_FIELDS: readonly string[] = BASH_NODE_AI_FIELDS.filter(
-  f => f !== 'model' && f !== 'provider'
+  f => f !== 'model' && f !== 'provider' && f !== 'bgAgent'
 );
 
 // ---------------------------------------------------------------------------
@@ -570,6 +573,7 @@ export const dagNodeSchema = dagNodeBaseSchema
       ...(data.fallbackModel !== undefined ? { fallbackModel: data.fallbackModel } : {}),
       ...(data.betas !== undefined ? { betas: data.betas } : {}),
       ...(data.sandbox !== undefined ? { sandbox: data.sandbox } : {}),
+      ...(data.bgAgent !== undefined ? { bgAgent: data.bgAgent } : {}),
     };
 
     if (data.command !== undefined && data.command.trim().length > 0) {

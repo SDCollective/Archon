@@ -95,8 +95,9 @@ export class ClaudeBgProvider implements IAgentProvider {
     const pollIntervalMs = defaults.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const deps = this.injectedDeps ?? defaultDeps(binary);
 
-    const agentNames = nodeConfig?.agents ? Object.keys(nodeConfig.agents) : [];
-    const agent = agentNames[0] ?? defaults.defaultAgent;
+    // Per-node named agent (bgAgent) wins; else the config-level default. Inline
+    // `agents` definitions are NOT consumed here — capabilities declares agents:false.
+    const agent = nodeConfig?.bgAgent ?? defaults.defaultAgent;
 
     const systemPrompt =
       typeof options?.systemPrompt === 'string' ? options.systemPrompt : undefined;

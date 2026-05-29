@@ -313,6 +313,8 @@ export interface NodeConfig {
   systemPrompt?: SystemPromptInput;
   fallbackModel?: string;
   idle_timeout?: number;
+  /** Named background-agent persona for the claude-bg provider's --agent flag. */
+  bgAgent?: string;
   [key: string]: unknown;
 }
 

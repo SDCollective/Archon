@@ -112,6 +112,44 @@ describe('ClaudeBgProvider.sendQuery', () => {
     expect(env?.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
+  test('strips ANTHROPIC_AUTH_TOKEN from the dispatch env (would disable --bg)', async () => {
+    const { provider, envs } = providerWith([{ state: 'completed' }]);
+    await drain(
+      provider.sendQuery('x', '/repo', undefined, {
+        env: { ANTHROPIC_AUTH_TOKEN: 'sk-ant-test', BAR: 'baz' },
+      })
+    );
+    const env = envs[0];
+    expect(env).toBeDefined();
+    expect(env?.BAR).toBe('baz');
+    expect(env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  test('uses nodeConfig.bgAgent as the --agent flag', async () => {
+    const { provider, runs } = providerWith([{ state: 'completed' }]);
+    await drain(
+      provider.sendQuery('x', '/repo', undefined, {
+        nodeConfig: { nodeId: 'n', bgAgent: 'story-reviewer' },
+      })
+    );
+    const idx = runs[0].indexOf('--agent');
+    expect(idx).not.toBe(-1);
+    expect(runs[0][idx + 1]).toBe('story-reviewer');
+  });
+
+  test('inline agents on nodeConfig does NOT produce --agent (agents:false)', async () => {
+    const { provider, runs } = providerWith([{ state: 'completed' }]);
+    await drain(
+      provider.sendQuery('x', '/repo', undefined, {
+        nodeConfig: {
+          nodeId: 'n',
+          agents: { foo: { description: 'a foo agent', prompt: 'do foo' } },
+        },
+      })
+    );
+    expect(runs[0]).not.toContain('--agent');
+  });
+
   test('throws when the session never spawns (no state file after retry)', async () => {
     const { provider } = providerWith([null, null]);
     await expect(drain(provider.sendQuery('x', '/repo'))).rejects.toThrow(/never spawned/i);

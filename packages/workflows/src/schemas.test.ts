@@ -410,6 +410,23 @@ describe('dagNodeSchema — new Claude SDK options', () => {
       expect('thinking' in result.data).toBe(false);
     }
   });
+
+  test('parses bgAgent on a prompt node and round-trips the field', () => {
+    const result = dagNodeSchema.safeParse({
+      id: 'n',
+      prompt: 'do it',
+      bgAgent: 'story-reviewer',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect((result.data as PromptNode).bgAgent).toBe('story-reviewer');
+    }
+  });
+
+  test('rejects empty bgAgent string', () => {
+    const result = dagNodeSchema.safeParse({ id: 'n', prompt: 'do it', bgAgent: '' });
+    expect(result.success).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -656,6 +673,7 @@ describe('SCRIPT_NODE_AI_FIELDS', () => {
       'fallbackModel',
       'betas',
       'sandbox',
+      'bgAgent',
     ];
     for (const field of expectedFields) {
       expect(SCRIPT_NODE_AI_FIELDS).toContain(field);
@@ -668,9 +686,10 @@ describe('SCRIPT_NODE_AI_FIELDS', () => {
 // ---------------------------------------------------------------------------
 
 describe('LOOP_NODE_AI_FIELDS', () => {
-  test('excludes model and provider (loop nodes support them)', () => {
+  test('excludes model, provider, and bgAgent (loop nodes support them)', () => {
     expect(LOOP_NODE_AI_FIELDS).not.toContain('model');
     expect(LOOP_NODE_AI_FIELDS).not.toContain('provider');
+    expect(LOOP_NODE_AI_FIELDS).not.toContain('bgAgent');
   });
 
   test('contains all other AI-specific fields from BASH_NODE_AI_FIELDS', () => {

@@ -477,6 +477,7 @@ async function resolveNodeProviderAndModel(
     maxBudgetUsd: node.maxBudgetUsd,
     systemPrompt: node.systemPrompt,
     fallbackModel: fb,
+    bgAgent: node.bgAgent,
   };
 
   // Pass assistantConfig from config — provider parses internally
