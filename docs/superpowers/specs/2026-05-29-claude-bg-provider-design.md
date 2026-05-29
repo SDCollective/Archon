@@ -111,11 +111,11 @@ Built from `SendQueryOptions` + `NodeConfig` (`types.ts:242-316`) and the worktr
 |---|---|---|
 | `cwd` (param) | `execFileAsync` `cwd` (and `cd`) | required so repo settings/worktree resolve; matches SDC orient lesson |
 | `resumeSessionId` | `--resume <id>` | cross-node continuity; relies on `--bg` resuming a normal session |
-| `nodeConfig.agents` (named) or default | `--agent <name>` | **named** agents only |
+| `node.bgAgent` (per-node) ?? `defaults.defaultAgent` | `--agent <name>` | **IMPLEMENTED as a dedicated `bgAgent` node field** (added to `dagNodeBaseSchema`), NOT the inline `agents:` map. This keeps `agents:false` honest — inline agent *definitions* are genuinely ignored; `bgAgent` only *names* a persona. |
 | `options.model` / assistant default | `--model` | passthrough, unvalidated (per Archon model policy) |
 | `options.systemPrompt` | `--append-system-prompt` | |
 | `nodeConfig.allowed_tools` / `denied_tools` | `--allowedTools` / `--disallowedTools` | subject to `--bg` permission model (§7) |
-| `nodeConfig.mcp` | `--mcp-config <file>` | path on disk; expand env first (reuse `mcp/config.ts`) |
+| `nodeConfig.mcp` | `--mcp-config <file>` | **As implemented, the raw path is passed through; Archon-side `loadMcpConfig` env-var expansion + `mcp__<name>__*` wildcard injection are DEFERRED to the Task 8 host spike** (the `claude` CLI reads the file itself and may expand env vars natively — verify before adding redundant expansion). |
 | `nodeConfig.effort` | `--effort` | |
 | node id | `-n "<node-id>"` | identifies the session in `claude agents` |
 | `options.abortSignal` | → `claude stop <id>` | cancellation (§5.4) |
@@ -228,6 +228,7 @@ Archon runs independent nodes in a topological layer concurrently (`Promise.allS
 5. **Heartbeat cadence vs `STEP_IDLE_TIMEOUT_MS`.** Pick a poll interval comfortably under the idle timeout.
 6. **Exact `state.json` vocabulary.** Confirm the precise `.state` values the supervisor writes (SDC observed `running`/`idle`/`busy`/`failed`; the agent-view UI shows Working/Needs-input/Idle/Completed/Failed/Stopped). The poll logic in §5.1 must map these correctly — especially distinguishing "done" from "waiting for input." Verify against a real session before finalizing the terminal/stall sets.
 7. **Billing durability.** `--bg` subscription billing is inferred (agent-view is a research preview) and sits on the interactive-vs-programmatic fault line; watch for reclassification after June 15.
+8. **MCP env-var expansion (deferred from impl).** The provider passes `--mcp-config <path>` raw. Confirm whether `claude --bg --mcp-config` expands `$VAR` references in the MCP config's `env` fields itself. If it does NOT, wire in `loadMcpConfig()` (expand + write a temp file) and inject `mcp__<name>__*` into `--allowedTools`, matching the SDK `ClaudeProvider`. If it does, no change needed.
 
 ---
 
