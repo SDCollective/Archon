@@ -264,6 +264,35 @@ describe('validateCommand', () => {
 // =============================================================================
 
 describe('discoverAvailableCommands', () => {
+  // Isolate ARCHON_HOME to an empty temp dir so these tests don't pick up the
+  // developer's real ~/.archon/commands — home-scoped commands are discovered
+  // unconditionally, so without this the "sorted list" / "empty array" tests
+  // fail on any machine that has global commands installed. Mirrors the
+  // isolation pattern in the nested 'home-scoped commands' block below.
+  let isolatedHome: string;
+  const originalArchonHome = process.env.ARCHON_HOME;
+  const originalArchonDocker = process.env.ARCHON_DOCKER;
+
+  beforeEach(async () => {
+    isolatedHome = await mkdtemp(join(tmpdir(), 'validator-isohome-'));
+    process.env.ARCHON_HOME = isolatedHome;
+    delete process.env.ARCHON_DOCKER;
+  });
+
+  afterEach(async () => {
+    await rm(isolatedHome, { recursive: true, force: true });
+    if (originalArchonHome === undefined) {
+      delete process.env.ARCHON_HOME;
+    } else {
+      process.env.ARCHON_HOME = originalArchonHome;
+    }
+    if (originalArchonDocker === undefined) {
+      delete process.env.ARCHON_DOCKER;
+    } else {
+      process.env.ARCHON_DOCKER = originalArchonDocker;
+    }
+  });
+
   test('finds commands in .archon/commands/', async () => {
     await createCommandFile('my-command');
     await createCommandFile('other-command');
