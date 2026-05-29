@@ -25,7 +25,7 @@ function providerWith(
     run: async (args, opts) => {
       runs.push(args);
       envs.push(opts.env);
-      return { stdout: 'backgrounded · job-1 · node\n', stderr: '' };
+      return { stdout: 'backgrounded · job1 · node\n', stderr: '' };
     },
     stop: async id => {
       stops.push(id);
@@ -33,7 +33,12 @@ function providerWith(
     readState: async () => (i < states.length ? states[i++] : states[states.length - 1]),
     // Default: empty list → no status, no waiting, full-UUID falls back to short id
     listSessions: async () => [],
-    sleep: async () => {},
+    // Yield to the macrotask queue (not a no-op): if a poll loop ever fails to
+    // terminate, this lets bun's per-test timeout fire instead of starving the
+    // event loop into a tight microtask spin (which OOMs rather than timing out).
+    sleep: async () => {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    },
     ...overrides,
   };
   return { provider: new ClaudeBgProvider(deps), runs, stops, envs };
@@ -46,7 +51,7 @@ describe('ClaudeBgProvider.sendQuery', () => {
     expect(runs[0]).toContain('--bg');
     const result = chunks.find(c => c.type === 'result');
     expect(result).toBeDefined();
-    expect((result as Extract<MessageChunk, { type: 'result' }>).sessionId).toBe('job-1');
+    expect((result as Extract<MessageChunk, { type: 'result' }>).sessionId).toBe('job1');
     expect((result as Extract<MessageChunk, { type: 'result' }>).isError).toBe(false);
   });
 
@@ -98,7 +103,7 @@ describe('ClaudeBgProvider.sendQuery', () => {
     await expect(
       drain(provider.sendQuery('x', '/repo', undefined, { abortSignal: controller.signal }))
     ).rejects.toThrow(/abort/i);
-    expect(stops).toContain('job-1');
+    expect(stops).toContain('job1');
   });
 
   test('strips API-key env vars from the dispatch env (would disable --bg)', async () => {
@@ -170,16 +175,16 @@ describe('ClaudeBgProvider.sendQuery', () => {
   test('listSessions waiting row → rejects with allowlist hint (does not hang)', async () => {
     // .state stays 'running' — this verifies the stall is caught via agents --json,
     // not via the .state path, and that the generator rejects rather than looping.
-    // The dispatched short id is 'job-1'; the row's sessionId must start with 'job-1'.
+    // The dispatched short id is 'job1'; the row's sessionId must start with 'job1'.
     const { provider } = providerWith([{ state: 'running' }, { state: 'running' }], {
-      listSessions: async () => [{ sessionId: 'job-1-x-y-z', status: 'waiting' }],
+      listSessions: async () => [{ sessionId: 'job1-x-y-z', status: 'waiting' }],
     });
     await expect(drain(provider.sendQuery('x', '/repo'))).rejects.toThrow(/allowlist/i);
   });
 
   test('listSessions busy row with .state running then done → completes normally', async () => {
     const { provider } = providerWith([{ state: 'running' }, { state: 'done' }], {
-      listSessions: async () => [{ sessionId: 'job-1-x-y-z', status: 'busy' }],
+      listSessions: async () => [{ sessionId: 'job1-x-y-z', status: 'busy' }],
     });
     const chunks = await drain(provider.sendQuery('x', '/repo'));
     const result = chunks.find(c => c.type === 'result') as Extract<
@@ -209,7 +214,7 @@ describe('ClaudeBgProvider.sendQuery', () => {
   // ---------------------------------------------------------------------------
 
   test('result chunk carries the full UUID resolved from agents --json (not the short id)', async () => {
-    const fullUuid = 'job-1-4729-4b02-a7af';
+    const fullUuid = 'job1-4729-4b02-a7af';
     const { provider } = providerWith([{ state: 'running' }, { state: 'done' }], {
       listSessions: async () => [{ sessionId: fullUuid, status: 'idle' }],
     });
@@ -232,8 +237,8 @@ describe('ClaudeBgProvider.sendQuery', () => {
       { type: 'result' }
     >;
     expect(result).toBeDefined();
-    // Falls back to the short id parsed from stdout ('job-1')
-    expect(result.sessionId).toBe('job-1');
+    // Falls back to the short id parsed from stdout ('job1')
+    expect(result.sessionId).toBe('job1');
   });
 
   // ---------------------------------------------------------------------------
