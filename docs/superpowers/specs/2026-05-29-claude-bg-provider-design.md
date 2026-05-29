@@ -101,9 +101,13 @@ The contract boundary `IAgentProvider` (`packages/providers/src/types.ts:376-401
                       • needs_input / idle (in .state) → STALL fallback (unlikely; primary is agents)
                       • running / busy / working / unknown → heartbeat, continue
                  d. yield { type:'system', content:'' }  // heartbeat (§5.5)
-5. CAPTURE   — (bonus, gated) if the workflow references $<node>.output:
-                 best-effort `claude logs <id>` → yield { type:'assistant', content:text }
-                 (if unavailable/empty, node relies on artifacts — acceptable per §2)
+5. CAPTURE   — REQUIRED (not a bonus): scrape `claude logs <id>` → yield { type:'assistant', content:text }
+                 truncated to 100k chars. The dag-executor's empty-output guard (dag-executor.ts:1139)
+                 fails any node with empty nodeOutputText — since claude-bg streams no inline assistant
+                 text, this scrape is mandatory to satisfy that guard and enable $nodeId.output data-flow.
+                 Fallback: if logs are empty or unavailable, yield a short completion marker string
+                 (e.g. "claude-bg session <id> completed (output produced out-of-band…)") — guarantees
+                 non-empty output even when the session produced no readable log output.
 6. RESULT    — yield { type:'result', sessionId:id, isError:(state==='failed'),
                        errorSubtype:(state==='failed' ? 'error_during_execution' : undefined) }
                generator returns → executor records sessionId, marks node done → DAG advances
@@ -134,7 +138,7 @@ Built from `SendQueryOptions` + `NodeConfig` (`types.ts:242-316`) and the worktr
 
 Minimal, batch-shaped subset of the union (`types.ts:178-222`):
 - `system` (empty) — heartbeats during polling (keep the executor's idle timer alive).
-- `assistant` — only in the bonus data-flow path, carrying scraped `claude logs` text.
+- `assistant` — emitted on every successful completion, carrying the scraped `claude logs <id>` output (truncated to 100k chars) or the completion-marker fallback. This chunk is **required** — it is what satisfies the dag-executor's empty-output guard (`dag-executor.ts:1139`) and populates `$nodeId.output`. Always emitted before the `result` chunk.
 - `result` — terminal chunk carrying `sessionId` (for persistence/resume) and `isError`/`errorSubtype`. `tokens`/`cost`/`structuredOutput` are omitted (unavailable from `--bg`).
 
 `tool` / `tool_result` / `rate_limit` chunks are **not** emitted; tool telemetry is not available from `--bg`.
@@ -238,7 +242,8 @@ Archon runs independent nodes in a topological layer concurrently (`Promise.allS
 5. **Heartbeat cadence vs `STEP_IDLE_TIMEOUT_MS`.** Pick a poll interval comfortably under the idle timeout.
 6. **Exact `state.json` vocabulary.** Confirm the precise `.state` values the supervisor writes (SDC observed `running`/`idle`/`busy`/`failed`; the agent-view UI shows Working/Needs-input/Idle/Completed/Failed/Stopped). The poll logic in §5.1 must map these correctly — especially distinguishing "done" from "waiting for input." Verify against a real session before finalizing the terminal/stall sets.
 7. **Billing durability.** `--bg` subscription billing is inferred (agent-view is a research preview) and sits on the interactive-vs-programmatic fault line; watch for reclassification after June 15.
-8. **MCP env-var expansion (deferred from impl).** The provider passes `--mcp-config <path>` raw. Confirm whether `claude --bg --mcp-config` expands `$VAR` references in the MCP config's `env` fields itself. If it does NOT, wire in `loadMcpConfig()` (expand + write a temp file) and inject `mcp__<name>__*` into `--allowedTools`, matching the SDK `ClaudeProvider`. If it does, no change needed.
+8. **`claude logs` output cleaning (Task-8 live-verification item).** The provider currently yields the raw `claude logs <id>` output as the node's assistant text. Verify during host integration testing whether the output includes a preamble, ANSI formatting codes, or other non-content framing that should be stripped before downstream nodes consume it via `$nodeId.output`. If cleaning is needed, add a lightweight post-processing step in `readLogs` (e.g. strip ANSI escapes, trim leading metadata lines). Leave raw in v1 until verified.
+9. **MCP env-var expansion (deferred from impl).** The provider passes `--mcp-config <path>` raw. Confirm whether `claude --bg --mcp-config` expands `$VAR` references in the MCP config's `env` fields itself. If it does NOT, wire in `loadMcpConfig()` (expand + write a temp file) and inject `mcp__<name>__*` into `--allowedTools`, matching the SDK `ClaudeProvider`. If it does, no change needed.
 
 ---
 

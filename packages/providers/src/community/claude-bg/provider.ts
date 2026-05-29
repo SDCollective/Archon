@@ -27,6 +27,7 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_POLL_INTERVAL_MS = 4000;
 const VERIFY_DELAY_MS = 2000;
 const BG_BLOCKED_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']);
+const MAX_LOG_OUTPUT_CHARS = 100_000;
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
@@ -51,6 +52,8 @@ export interface ClaudeBgDeps {
   /** Return the parsed `claude agents --json` array (or null/[] on error). */
   listSessions: () => Promise<unknown>;
   sleep: (ms: number) => Promise<void>;
+  /** Scrape `claude logs <id>`; returns '' on any error, never throws. */
+  readLogs: (id: string) => Promise<string>;
 }
 
 function defaultDeps(binary: string): ClaudeBgDeps {
@@ -78,6 +81,16 @@ function defaultDeps(binary: string): ClaudeBgDeps {
       }
     },
     sleep: ms => new Promise(r => setTimeout(r, ms)),
+    readLogs: async (id): Promise<string> => {
+      try {
+        const { stdout } = await execFileAsync(binary, ['logs', id], {
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        return stdout;
+      } catch {
+        return '';
+      }
+    },
   };
 }
 
@@ -206,6 +219,16 @@ export class ClaudeBgProvider implements IAgentProvider {
         // Resolve the full UUID from agents --json so the caller can resume
         // with --resume <full-uuid> rather than the short id printed by --bg.
         const fullId = findSessionId(await deps.listSessions(), id) ?? id;
+        // claude-bg streams no assistant text inline; surface the session's final
+        // output by scraping `claude logs`, so the node has non-empty output (the
+        // executor fails empty-output nodes) and $nodeId.output works. Marker
+        // fallback guarantees non-empty even if logs are empty/unavailable.
+        const rawLogs = (await deps.readLogs(id)).trim();
+        const output =
+          rawLogs.length > 0
+            ? rawLogs.slice(0, MAX_LOG_OUTPUT_CHARS)
+            : `claude-bg session ${fullId} completed (output produced out-of-band — see artifacts or 'claude logs ${id}').`;
+        yield { type: 'assistant', content: output };
         yield { type: 'result', sessionId: fullId, isError: false };
         return;
       }

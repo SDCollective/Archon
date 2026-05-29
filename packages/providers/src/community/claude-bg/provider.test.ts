@@ -39,6 +39,7 @@ function providerWith(
     sleep: async () => {
       await new Promise(resolve => setTimeout(resolve, 0));
     },
+    readLogs: async () => '',
     ...overrides,
   };
   return { provider: new ClaudeBgProvider(deps), runs, stops, envs };
@@ -261,5 +262,52 @@ describe('ClaudeBgProvider.sendQuery', () => {
     const idx = runs[0].indexOf('--resume');
     expect(idx).not.toBe(-1);
     expect(runs[0][idx + 1]).toBe('some-stale-full-uuid');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Log scraping: assistant chunk emitted before result on completion
+  // ---------------------------------------------------------------------------
+
+  test('logs scraped into output: assistant chunk contains log text and precedes result', async () => {
+    const { provider } = providerWith([{ state: 'running' }, { state: 'completed' }], {
+      readLogs: async () => 'agent did the work\n',
+    });
+    const chunks = await drain(provider.sendQuery('x', '/repo'));
+    const assistantIdx = chunks.findIndex(c => c.type === 'assistant');
+    const resultIdx = chunks.findIndex(c => c.type === 'result');
+    expect(assistantIdx).not.toBe(-1);
+    const assistantChunk = chunks[assistantIdx] as Extract<MessageChunk, { type: 'assistant' }>;
+    expect(assistantChunk.content).toContain('agent did the work');
+    // assistant must be emitted before the result
+    expect(assistantIdx).toBeLessThan(resultIdx);
+  });
+
+  test('marker fallback on empty logs: assistant chunk contains "completed" and session id', async () => {
+    const { provider } = providerWith([{ state: 'completed' }], {
+      readLogs: async () => '',
+    });
+    const chunks = await drain(provider.sendQuery('x', '/repo'));
+    const assistantChunk = chunks.find(c => c.type === 'assistant') as Extract<
+      MessageChunk,
+      { type: 'assistant' }
+    >;
+    expect(assistantChunk).toBeDefined();
+    expect(assistantChunk.content).toContain('completed');
+    // The short id 'job1' (parsed from the stdout stub) appears in the marker
+    expect(assistantChunk.content).toContain('job1');
+  });
+
+  test('truncation: assistant content is capped at 100k chars when logs are longer', async () => {
+    const bigLog = 'x'.repeat(200_000);
+    const { provider } = providerWith([{ state: 'completed' }], {
+      readLogs: async () => bigLog,
+    });
+    const chunks = await drain(provider.sendQuery('x', '/repo'));
+    const assistantChunk = chunks.find(c => c.type === 'assistant') as Extract<
+      MessageChunk,
+      { type: 'assistant' }
+    >;
+    expect(assistantChunk).toBeDefined();
+    expect(assistantChunk.content.length).toBeLessThanOrEqual(100_000);
   });
 });
