@@ -155,6 +155,19 @@ export interface OpencodeProviderDefaults {
   agent?: string;
 }
 
+/** Per-provider defaults for the claude-bg community provider (.archon/config.yaml assistants.claude-bg). */
+export interface ClaudeBgProviderDefaults {
+  [key: string]: unknown;
+  /** Model alias/id passed to `claude --model`. */
+  model?: string;
+  /** Path to the `claude` executable; falls back to PATH. */
+  claudeBinaryPath?: string;
+  /** Default `--agent` to dispatch when a node does not name one. */
+  defaultAgent?: string;
+  /** Poll cadence for ~/.claude/jobs/<id>/state.json (ms). */
+  pollIntervalMs?: number;
+}
+
 /** Generic per-provider defaults bag used by config surfaces and UI. */
 export type ProviderDefaults = Record<string, unknown>;
 
