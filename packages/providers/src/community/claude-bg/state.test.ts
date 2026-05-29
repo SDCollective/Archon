@@ -6,6 +6,8 @@ import {
   readJobState,
   classifySessionStatus,
   findSessionStatus,
+  findSessionId,
+  hasSessionId,
 } from './state';
 
 describe('parseBackgroundedId', () => {
@@ -113,5 +115,60 @@ describe('findSessionStatus', () => {
       42,
     ];
     expect(findSessionStatus(sparse, 'aa9e58c2')).toBeNull();
+  });
+});
+
+describe('findSessionId', () => {
+  const rows = [
+    { sessionId: 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95', status: 'busy', name: 'my-task' },
+    { sessionId: 'beef0001-aaaa-bbbb-cccc-ddddeeeeeeee', status: 'idle', name: 'other-task' },
+  ];
+
+  test('returns the full sessionId for a row whose prefix matches the short id', () => {
+    expect(findSessionId(rows, 'aa9e58c2')).toBe('aa9e58c2-b3e5-46c3-95d9-6df2afd40b95');
+  });
+
+  test('matches a different row by prefix', () => {
+    expect(findSessionId(rows, 'beef0001')).toBe('beef0001-aaaa-bbbb-cccc-ddddeeeeeeee');
+  });
+
+  test('returns null when no row matches', () => {
+    expect(findSessionId(rows, 'deadbeef')).toBeNull();
+  });
+
+  test('returns null for non-array input', () => {
+    expect(findSessionId(null, 'aa9e58c2')).toBeNull();
+    expect(findSessionId('not an array', 'aa9e58c2')).toBeNull();
+    expect(findSessionId({}, 'aa9e58c2')).toBeNull();
+  });
+
+  test('skips rows missing sessionId field', () => {
+    const sparse = [{ name: 'no-session-id', status: 'busy' }, null, 42];
+    expect(findSessionId(sparse, 'aa9e58c2')).toBeNull();
+  });
+});
+
+describe('hasSessionId', () => {
+  const rows = [
+    { sessionId: 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95', status: 'busy' },
+    { sessionId: 'beef0001-aaaa-bbbb-cccc-ddddeeeeeeee', status: 'idle' },
+  ];
+
+  test('returns true when the full id exactly matches a row', () => {
+    expect(hasSessionId(rows, 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95')).toBe(true);
+  });
+
+  test('returns false for a prefix-only (short) id that is not an exact match', () => {
+    expect(hasSessionId(rows, 'aa9e58c2')).toBe(false);
+  });
+
+  test('returns false when the full id is not in the list', () => {
+    expect(hasSessionId(rows, 'deadbeef-0000-0000-0000-000000000000')).toBe(false);
+  });
+
+  test('returns false for non-array input', () => {
+    expect(hasSessionId(null, 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95')).toBe(false);
+    expect(hasSessionId('not an array', 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95')).toBe(false);
+    expect(hasSessionId({}, 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95')).toBe(false);
   });
 });

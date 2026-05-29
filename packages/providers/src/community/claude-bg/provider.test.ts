@@ -31,8 +31,8 @@ function providerWith(
       stops.push(id);
     },
     readState: async () => (i < states.length ? states[i++] : states[states.length - 1]),
-    // Default: no waiting status — existing tests are unaffected
-    readStatus: async () => null,
+    // Default: empty list → no status, no waiting, full-UUID falls back to short id
+    listSessions: async () => [],
     sleep: async () => {},
     ...overrides,
   };
@@ -167,18 +167,19 @@ describe('ClaudeBgProvider.sendQuery', () => {
   // Hybrid poll: session status from `claude agents --json`
   // ---------------------------------------------------------------------------
 
-  test('readStatus waiting → rejects with allowlist hint (does not hang)', async () => {
+  test('listSessions waiting row → rejects with allowlist hint (does not hang)', async () => {
     // .state stays 'running' — this verifies the stall is caught via agents --json,
     // not via the .state path, and that the generator rejects rather than looping.
+    // The dispatched short id is 'job-1'; the row's sessionId must start with 'job-1'.
     const { provider } = providerWith([{ state: 'running' }, { state: 'running' }], {
-      readStatus: async () => 'waiting',
+      listSessions: async () => [{ sessionId: 'job-1-x-y-z', status: 'waiting' }],
     });
     await expect(drain(provider.sendQuery('x', '/repo'))).rejects.toThrow(/allowlist/i);
   });
 
-  test('readStatus busy with .state running then done → completes normally', async () => {
+  test('listSessions busy row with .state running then done → completes normally', async () => {
     const { provider } = providerWith([{ state: 'running' }, { state: 'done' }], {
-      readStatus: async () => 'busy',
+      listSessions: async () => [{ sessionId: 'job-1-x-y-z', status: 'busy' }],
     });
     const chunks = await drain(provider.sendQuery('x', '/repo'));
     const result = chunks.find(c => c.type === 'result') as Extract<
@@ -189,11 +190,11 @@ describe('ClaudeBgProvider.sendQuery', () => {
     expect(result.isError).toBe(false);
   });
 
-  test('readStatus null (agents unavailable) falls through to .state terminal detection', async () => {
-    // readStatus null means `claude agents --json` failed or the session isn't listed yet;
+  test('listSessions null (agents unavailable) falls through to .state terminal detection', async () => {
+    // null means `claude agents --json` failed or the session isn't listed yet;
     // the provider must not treat this as a stall — it falls through to .state.
     const { provider } = providerWith([{ state: 'running' }, { state: 'completed' }], {
-      readStatus: async () => null,
+      listSessions: async () => null,
     });
     const chunks = await drain(provider.sendQuery('x', '/repo'));
     const result = chunks.find(c => c.type === 'result') as Extract<
@@ -201,5 +202,59 @@ describe('ClaudeBgProvider.sendQuery', () => {
       { type: 'result' }
     >;
     expect(result.isError).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Full-UUID capture: result chunk carries full sessionId from agents --json
+  // ---------------------------------------------------------------------------
+
+  test('result chunk carries the full UUID resolved from agents --json (not the short id)', async () => {
+    const fullUuid = 'job-1-4729-4b02-a7af';
+    const { provider } = providerWith([{ state: 'running' }, { state: 'done' }], {
+      listSessions: async () => [{ sessionId: fullUuid, status: 'idle' }],
+    });
+    const chunks = await drain(provider.sendQuery('x', '/repo'));
+    const result = chunks.find(c => c.type === 'result') as Extract<
+      MessageChunk,
+      { type: 'result' }
+    >;
+    expect(result).toBeDefined();
+    expect(result.sessionId).toBe(fullUuid);
+  });
+
+  test('result chunk falls back to short id when full UUID is not in agents --json', async () => {
+    const { provider } = providerWith([{ state: 'completed' }], {
+      listSessions: async () => [],
+    });
+    const chunks = await drain(provider.sendQuery('x', '/repo'));
+    const result = chunks.find(c => c.type === 'result') as Extract<
+      MessageChunk,
+      { type: 'result' }
+    >;
+    expect(result).toBeDefined();
+    // Falls back to the short id parsed from stdout ('job-1')
+    expect(result.sessionId).toBe('job-1');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Resume guard: --resume only passed when the full UUID is listed
+  // ---------------------------------------------------------------------------
+
+  test('resume guard: --resume is omitted when the full UUID is not in agents --json', async () => {
+    const { provider, runs } = providerWith([{ state: 'completed' }], {
+      listSessions: async () => [],
+    });
+    await drain(provider.sendQuery('p', '/repo', 'some-stale-full-uuid'));
+    expect(runs[0]).not.toContain('--resume');
+  });
+
+  test('resume guard: --resume is passed when the full UUID is listed in agents --json', async () => {
+    const { provider, runs } = providerWith([{ state: 'completed' }], {
+      listSessions: async () => [{ sessionId: 'some-stale-full-uuid', status: 'idle' }],
+    });
+    await drain(provider.sendQuery('p', '/repo', 'some-stale-full-uuid'));
+    const idx = runs[0].indexOf('--resume');
+    expect(idx).not.toBe(-1);
+    expect(runs[0][idx + 1]).toBe('some-stale-full-uuid');
   });
 });

@@ -15,7 +15,9 @@ import { buildClaudeBgArgs } from './invocation';
 import {
   classifyJobState,
   classifySessionStatus,
+  findSessionId,
   findSessionStatus,
+  hasSessionId,
   parseBackgroundedId,
   readJobState,
 } from './state';
@@ -46,8 +48,8 @@ export interface ClaudeBgDeps {
   }>;
   stop: (id: string) => Promise<void>;
   readState: (id: string) => Promise<unknown>;
-  /** Read session status for the given short id via `claude agents --json`. */
-  readStatus: (id: string) => Promise<string | null>;
+  /** Return the parsed `claude agents --json` array (or null/[] on error). */
+  listSessions: () => Promise<unknown>;
   sleep: (ms: number) => Promise<void>;
 }
 
@@ -65,12 +67,12 @@ function defaultDeps(binary: string): ClaudeBgDeps {
       await execFileAsync(binary, ['stop', id]).catch(() => undefined);
     },
     readState: id => readJobState(id),
-    readStatus: async (id): Promise<string | null> => {
+    listSessions: async (): Promise<unknown> => {
       try {
         const { stdout } = await execFileAsync(binary, ['agents', '--json'], {
           maxBuffer: 10 * 1024 * 1024,
         });
-        return findSessionStatus(JSON.parse(stdout) as unknown, id);
+        return JSON.parse(stdout);
       } catch {
         return null;
       }
@@ -120,11 +122,24 @@ export class ClaudeBgProvider implements IAgentProvider {
     const systemPrompt =
       typeof options?.systemPrompt === 'string' ? options.systemPrompt : undefined;
 
+    // Resume guard: only pass a resumeSessionId to --resume if the full UUID is
+    // currently listed in `claude agents --json`. A stale/unlisted id would drop
+    // `--resume` into an interactive picker that hangs a headless session.
+    let effectiveResumeId: string | undefined;
+    if (resumeSessionId) {
+      const resumeRows = await deps.listSessions();
+      if (hasSessionId(resumeRows, resumeSessionId)) {
+        effectiveResumeId = resumeSessionId;
+      } else {
+        getLog().warn({ resumeSessionId }, 'provider.claude-bg.resume_target_missing');
+      }
+    }
+
     const args = buildClaudeBgArgs({
       prompt,
       nodeId: nodeConfig?.nodeId,
       model: options?.model ?? defaults.model,
-      resumeSessionId,
+      resumeSessionId: effectiveResumeId,
       agent,
       systemPrompt,
       allowedTools: nodeConfig?.allowed_tools,
@@ -175,7 +190,7 @@ export class ClaudeBgProvider implements IAgentProvider {
       }
 
       // 3b. Session status from `claude agents --json` — stall detection
-      const sessionStatus = classifySessionStatus(await deps.readStatus(id));
+      const sessionStatus = classifySessionStatus(findSessionStatus(await deps.listSessions(), id));
       if (sessionStatus === 'waiting') {
         getLog().error({ id }, 'provider.claude-bg.stalled');
         throw new Error(
@@ -188,14 +203,18 @@ export class ClaudeBgProvider implements IAgentProvider {
       const klass = classifyJobState(await deps.readState(id));
       if (klass === 'completed') {
         getLog().info({ id }, 'provider.claude-bg.completed');
-        yield { type: 'result', sessionId: id, isError: false };
+        // Resolve the full UUID from agents --json so the caller can resume
+        // with --resume <full-uuid> rather than the short id printed by --bg.
+        const fullId = findSessionId(await deps.listSessions(), id) ?? id;
+        yield { type: 'result', sessionId: fullId, isError: false };
         return;
       }
       if (klass === 'failed') {
         getLog().error({ id }, 'provider.claude-bg.failed');
+        const fullId = findSessionId(await deps.listSessions(), id) ?? id;
         yield {
           type: 'result',
-          sessionId: id,
+          sessionId: fullId,
           isError: true,
           errorSubtype: 'error_during_execution',
         };

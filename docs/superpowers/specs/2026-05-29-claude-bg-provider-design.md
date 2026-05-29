@@ -77,6 +77,8 @@ The contract boundary `IAgentProvider` (`packages/providers/src/types.ts:376-401
 ### 5.1 `sendQuery()` lifecycle
 
 > **Spike finding (2026-05-29):** `~/.claude/jobs/<id>/state.json` `.state` reports `working` even when a session is actually blocked waiting for tool approval. The authoritative stall signal is `claude agents --json`, whose per-row `status` field is `busy` (running), `waiting` (blocked — no operator in `--bg` mode), or `idle` (ambiguous: done or just sitting; not used as terminal). The short id (`aa9e58c2`) is the first dash-segment of the full UUID in `sessionId`. Terminal done/failed detection still comes from `.state` (spike-verified: `done` → completed, `failed`/`error`/`stopped` → failed). `idle` from agents is deliberately NOT treated as terminal to avoid races at startup.
+>
+> **Resume requires the FULL UUID (confirmed spike finding):** `claude --resume` requires the full session UUID (e.g. `d0ca4450-4729-4b02-a7af-1681df3a5100`). Passing the short id printed by `--bg` (`d0ca4450`) finds nothing and drops into an interactive picker — which hangs a headless session. Fix: at terminal state, the provider calls `claude agents --json`, finds the row whose `sessionId` starts with the short id, and returns the full UUID as `result.sessionId`. Resume input is guarded: before building args, the provider checks `hasSessionId(rows, resumeSessionId)` — if the id is not currently listed, `--resume` is omitted (starts fresh) and a WARN is logged. This prevents stale ids from ever reaching the interactive picker.
 
 `sendQuery(prompt, cwd, resumeSessionId?, options?): AsyncGenerator<MessageChunk>` runs as a dispatch-and-poll generator:
 

@@ -84,3 +84,35 @@ export function findSessionStatus(rows: unknown, shortId: string): string | null
   }
   return null;
 }
+
+/**
+ * Full sessionId of the agents-json row whose sessionId starts with the short
+ * id (first dash-segment); null if not found or input is invalid.
+ *
+ * Used to resolve the short id printed by `claude --bg` to the full UUID
+ * required by `claude --resume`.
+ */
+export function findSessionId(rows: unknown, shortId: string): string | null {
+  if (!Array.isArray(rows)) return null;
+  for (const r of rows) {
+    if (r && typeof r === 'object') {
+      const sid = (r as { sessionId?: unknown }).sessionId;
+      if (typeof sid === 'string' && sid.split('-')[0] === shortId) return sid;
+    }
+  }
+  return null;
+}
+
+/**
+ * True if any agents-json row's sessionId exactly matches the given full id.
+ *
+ * Used to guard resume input: a stale full UUID that is no longer listed in
+ * `claude agents --json` must not be passed to `--resume` (it would open an
+ * interactive picker and hang a headless session).
+ */
+export function hasSessionId(rows: unknown, fullId: string): boolean {
+  if (!Array.isArray(rows)) return false;
+  return rows.some(
+    r => r && typeof r === 'object' && (r as { sessionId?: unknown }).sessionId === fullId
+  );
+}
