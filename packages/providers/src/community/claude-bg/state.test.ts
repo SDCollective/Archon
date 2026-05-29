@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { parseBackgroundedId, classifyJobState, jobStatePath, readJobState } from './state';
+import {
+  parseBackgroundedId,
+  classifyJobState,
+  jobStatePath,
+  readJobState,
+  classifySessionStatus,
+  findSessionStatus,
+} from './state';
 
 describe('parseBackgroundedId', () => {
   test('extracts the id from the backgrounded line', () => {
@@ -50,5 +57,61 @@ describe('readJobState', () => {
   test('returns null for a non-existent id (errors swallowed, never throws)', async () => {
     const result = await readJobState('definitely-not-a-real-job-id-9f90c217');
     expect(result).toBeNull();
+  });
+});
+
+describe('classifySessionStatus', () => {
+  test('busy → running', () => {
+    expect(classifySessionStatus('busy')).toBe('running');
+  });
+  test('working → running', () => {
+    expect(classifySessionStatus('working')).toBe('running');
+  });
+  test('waiting → waiting', () => {
+    expect(classifySessionStatus('waiting')).toBe('waiting');
+  });
+  test('idle → other (ambiguous, not used as terminal)', () => {
+    expect(classifySessionStatus('idle')).toBe('other');
+  });
+  test('unknown string → other', () => {
+    expect(classifySessionStatus('something-new')).toBe('other');
+  });
+  test('null → other', () => {
+    expect(classifySessionStatus(null)).toBe('other');
+  });
+});
+
+describe('findSessionStatus', () => {
+  const rows = [
+    { sessionId: 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95', status: 'busy', name: 'my-task' },
+    { sessionId: 'beef0001-aaaa-bbbb-cccc-ddddeeeeeeee', status: 'idle', name: 'other-task' },
+  ];
+
+  test('matches the row whose sessionId starts with the short id', () => {
+    expect(findSessionStatus(rows, 'aa9e58c2')).toBe('busy');
+  });
+
+  test('matches a different row', () => {
+    expect(findSessionStatus(rows, 'beef0001')).toBe('idle');
+  });
+
+  test('returns null when no row matches', () => {
+    expect(findSessionStatus(rows, 'deadbeef')).toBeNull();
+  });
+
+  test('returns null for non-array input', () => {
+    expect(findSessionStatus(null, 'aa9e58c2')).toBeNull();
+    expect(findSessionStatus('not an array', 'aa9e58c2')).toBeNull();
+    expect(findSessionStatus({}, 'aa9e58c2')).toBeNull();
+  });
+
+  test('skips rows missing sessionId or status fields', () => {
+    const sparse = [
+      { name: 'no-session-id', status: 'busy' },
+      { sessionId: 'aa9e58c2-b3e5-46c3-95d9-6df2afd40b95' }, // no status
+      null,
+      42,
+    ];
+    expect(findSessionStatus(sparse, 'aa9e58c2')).toBeNull();
   });
 });

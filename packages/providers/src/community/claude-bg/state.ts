@@ -42,3 +42,45 @@ export async function readJobState(id: string): Promise<unknown> {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Session status — from `claude agents --json`
+// ---------------------------------------------------------------------------
+
+export type SessionStatusClass = 'running' | 'waiting' | 'other';
+
+/**
+ * Classify the `status` field from a `claude agents --json` row.
+ *
+ * - 'running'  → the session is actively working (busy/working).
+ * - 'waiting'  → the session is blocked needing input (permission prompt, no
+ *                operator present in --bg mode). This is a stall — fail fast.
+ * - 'other'    → idle (ambiguous; could be done or just starting) or unknown.
+ *                Terminal detection is delegated to .state (classifyJobState).
+ */
+export function classifySessionStatus(status: unknown): SessionStatusClass {
+  if (status === 'busy' || status === 'working') return 'running';
+  if (status === 'waiting') return 'waiting';
+  return 'other'; // idle (ambiguous) / unknown — terminal detection comes from .state
+}
+
+/**
+ * Find the session status for the given short id (first dash-segment of the
+ * full UUID) in the parsed array returned by `claude agents --json`.
+ *
+ * Pure function — takes already-parsed JSON; the exec goes in the provider.
+ * Returns the raw `status` string, or null if not found / input is invalid.
+ */
+export function findSessionStatus(rows: unknown, shortId: string): string | null {
+  if (!Array.isArray(rows)) return null;
+  for (const r of rows) {
+    if (r && typeof r === 'object') {
+      const sid = (r as { sessionId?: unknown }).sessionId;
+      const status = (r as { status?: unknown }).status;
+      if (typeof sid === 'string' && sid.split('-')[0] === shortId && typeof status === 'string') {
+        return status;
+      }
+    }
+  }
+  return null;
+}

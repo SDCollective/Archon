@@ -12,7 +12,13 @@ import type {
 import { CLAUDE_BG_CAPABILITIES } from './capabilities';
 import { parseClaudeBgConfig } from './config';
 import { buildClaudeBgArgs } from './invocation';
-import { classifyJobState, parseBackgroundedId, readJobState } from './state';
+import {
+  classifyJobState,
+  classifySessionStatus,
+  findSessionStatus,
+  parseBackgroundedId,
+  readJobState,
+} from './state';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +46,8 @@ export interface ClaudeBgDeps {
   }>;
   stop: (id: string) => Promise<void>;
   readState: (id: string) => Promise<unknown>;
+  /** Read session status for the given short id via `claude agents --json`. */
+  readStatus: (id: string) => Promise<string | null>;
   sleep: (ms: number) => Promise<void>;
 }
 
@@ -57,6 +65,16 @@ function defaultDeps(binary: string): ClaudeBgDeps {
       await execFileAsync(binary, ['stop', id]).catch(() => undefined);
     },
     readState: id => readJobState(id),
+    readStatus: async (id): Promise<string | null> => {
+      try {
+        const { stdout } = await execFileAsync(binary, ['agents', '--json'], {
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        return findSessionStatus(JSON.parse(stdout) as unknown, id);
+      } catch {
+        return null;
+      }
+    },
     sleep: ms => new Promise(r => setTimeout(r, ms)),
   };
 }
@@ -147,13 +165,26 @@ export class ClaudeBgProvider implements IAgentProvider {
       throw new Error(`claude --bg session ${id} failed during launch (retryable)`);
     }
 
-    // 3. Poll to a terminal state
+    // 3. Poll to a terminal state (hybrid: check session status FIRST, then .state)
     for (;;) {
+      // 3a. Abort check — always first
       if (options?.abortSignal?.aborted) {
         getLog().warn({ id }, 'provider.claude-bg.aborted');
         await deps.stop(id);
         throw new Error(`claude --bg session ${id} aborted`);
       }
+
+      // 3b. Session status from `claude agents --json` — stall detection
+      const sessionStatus = classifySessionStatus(await deps.readStatus(id));
+      if (sessionStatus === 'waiting') {
+        getLog().error({ id }, 'provider.claude-bg.stalled');
+        throw new Error(
+          `claude --bg session ${id} is blocked awaiting input with no operator — ` +
+            'broaden the repo .claude/settings.json allowlist (spec §6/§7)'
+        );
+      }
+
+      // 3c. Job state from ~/.claude/jobs/<id>/state.json — terminal detection
       const klass = classifyJobState(await deps.readState(id));
       if (klass === 'completed') {
         getLog().info({ id }, 'provider.claude-bg.completed');
@@ -170,6 +201,8 @@ export class ClaudeBgProvider implements IAgentProvider {
         };
         return;
       }
+      // klass === 'stalled' from .state (needs_input/idle in state.json) is also a stall;
+      // the agents --json check above is the primary signal, but keep this as a fallback.
       if (klass === 'stalled') {
         getLog().error({ id }, 'provider.claude-bg.stalled');
         throw new Error(
@@ -177,6 +210,8 @@ export class ClaudeBgProvider implements IAgentProvider {
             'broaden the repo .claude/settings.json allowlist (spec §6/§7)'
         );
       }
+
+      // Still running (running / unknown / other) — emit heartbeat and wait
       yield { type: 'system', content: '' };
       await deps.sleep(pollIntervalMs);
     }

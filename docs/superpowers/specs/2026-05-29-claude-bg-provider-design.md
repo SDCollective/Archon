@@ -76,6 +76,8 @@ The contract boundary `IAgentProvider` (`packages/providers/src/types.ts:376-401
 
 ### 5.1 `sendQuery()` lifecycle
 
+> **Spike finding (2026-05-29):** `~/.claude/jobs/<id>/state.json` `.state` reports `working` even when a session is actually blocked waiting for tool approval. The authoritative stall signal is `claude agents --json`, whose per-row `status` field is `busy` (running), `waiting` (blocked — no operator in `--bg` mode), or `idle` (ambiguous: done or just sitting; not used as terminal). The short id (`aa9e58c2`) is the first dash-segment of the full UUID in `sessionId`. Terminal done/failed detection still comes from `.state` (spike-verified: `done` → completed, `failed`/`error`/`stopped` → failed). `idle` from agents is deliberately NOT treated as terminal to avoid races at startup.
+
 `sendQuery(prompt, cwd, resumeSessionId?, options?): AsyncGenerator<MessageChunk>` runs as a dispatch-and-poll generator:
 
 ```
@@ -84,15 +86,19 @@ The contract boundary `IAgentProvider` (`packages/providers/src/types.ts:376-401
 3. VERIFY    — await delay (~2s) ; read ~/.claude/jobs/<id>/state.json
                state === 'failed' → throw classified error (Archon retry machinery handles it)
                state file absent after one retry → throw 'session never spawned'
-4. POLL      — loop, every POLL_INTERVAL_MS, re-read state.json:
-                 • abortSignal aborted → execFileAsync('claude', ['stop', id]) ; throw aborted
-                 • state in {running, busy} → yield { type:'system', content:'' }  // heartbeat (§5.5)
-                 • state in {needs_input, idle-while-awaiting-input} → STALL: there is no operator,
-                   so this is almost always a permission prompt the allowlist didn't cover (§6/§7).
-                   Fail fast with a clear error ("background session blocked awaiting input —
-                   broaden the repo allowlist"); do NOT treat as success.
-                 • state === 'completed' → break (success)
-                 • state === 'failed' → break (error)
+4. POLL      — loop (hybrid), every POLL_INTERVAL_MS:
+                 a. abortSignal aborted → execFileAsync('claude', ['stop', id]) ; throw aborted
+                 b. run `claude agents --json`, find the row whose sessionId starts with our short id:
+                      • status === 'waiting' → STALL (no operator; permission prompt). Fail fast.
+                        Error message: "broaden the repo .claude/settings.json allowlist"
+                      • status === 'busy'/'working' → 'running' (continue)
+                      • null / 'idle' / other → 'other' (fall through to .state)
+                 c. read ~/.claude/jobs/<id>/state.json (.state field):
+                      • completed / done → success (break)
+                      • failed / error / stopped → error (break)
+                      • needs_input / idle (in .state) → STALL fallback (unlikely; primary is agents)
+                      • running / busy / working / unknown → heartbeat, continue
+                 d. yield { type:'system', content:'' }  // heartbeat (§5.5)
 5. CAPTURE   — (bonus, gated) if the workflow references $<node>.output:
                  best-effort `claude logs <id>` → yield { type:'assistant', content:text }
                  (if unavailable/empty, node relies on artifacts — acceptable per §2)
@@ -130,6 +136,8 @@ Minimal, batch-shaped subset of the union (`types.ts:178-222`):
 - `result` — terminal chunk carrying `sessionId` (for persistence/resume) and `isError`/`errorSubtype`. `tokens`/`cost`/`structuredOutput` are omitted (unavailable from `--bg`).
 
 `tool` / `tool_result` / `rate_limit` chunks are **not** emitted; tool telemetry is not available from `--bg`.
+
+> **Spike finding:** stall detection is a thrown error (not a `result` chunk) — it aborts the generator early without yielding a terminal result. This is intentional: a stalled `--bg` session is not a work outcome; it requires user intervention (broadening the allowlist), and throwing allows Archon's error surface to surface it clearly.
 
 ### 5.4 Cancellation
 `options.abortSignal` (set by the executor's per-node `AbortController`, `dag-executor.ts:709-716`) is observed in the poll loop. On abort, run `claude stop <id>` and throw an aborted error so the executor stops the node cleanly.

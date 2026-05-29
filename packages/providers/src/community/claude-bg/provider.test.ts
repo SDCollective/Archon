@@ -31,6 +31,8 @@ function providerWith(
       stops.push(id);
     },
     readState: async () => (i < states.length ? states[i++] : states[states.length - 1]),
+    // Default: no waiting status — existing tests are unaffected
+    readStatus: async () => null,
     sleep: async () => {},
     ...overrides,
   };
@@ -159,5 +161,45 @@ describe('ClaudeBgProvider.sendQuery', () => {
     const { provider } = providerWith([{ state: 'completed' }]);
     expect(provider.getType()).toBe('claude-bg');
     expect(provider.getCapabilities().hooks).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Hybrid poll: session status from `claude agents --json`
+  // ---------------------------------------------------------------------------
+
+  test('readStatus waiting → rejects with allowlist hint (does not hang)', async () => {
+    // .state stays 'running' — this verifies the stall is caught via agents --json,
+    // not via the .state path, and that the generator rejects rather than looping.
+    const { provider } = providerWith([{ state: 'running' }, { state: 'running' }], {
+      readStatus: async () => 'waiting',
+    });
+    await expect(drain(provider.sendQuery('x', '/repo'))).rejects.toThrow(/allowlist/i);
+  });
+
+  test('readStatus busy with .state running then done → completes normally', async () => {
+    const { provider } = providerWith([{ state: 'running' }, { state: 'done' }], {
+      readStatus: async () => 'busy',
+    });
+    const chunks = await drain(provider.sendQuery('x', '/repo'));
+    const result = chunks.find(c => c.type === 'result') as Extract<
+      MessageChunk,
+      { type: 'result' }
+    >;
+    expect(result).toBeDefined();
+    expect(result.isError).toBe(false);
+  });
+
+  test('readStatus null (agents unavailable) falls through to .state terminal detection', async () => {
+    // readStatus null means `claude agents --json` failed or the session isn't listed yet;
+    // the provider must not treat this as a stall — it falls through to .state.
+    const { provider } = providerWith([{ state: 'running' }, { state: 'completed' }], {
+      readStatus: async () => null,
+    });
+    const chunks = await drain(provider.sendQuery('x', '/repo'));
+    const result = chunks.find(c => c.type === 'result') as Extract<
+      MessageChunk,
+      { type: 'result' }
+    >;
+    expect(result.isError).toBe(false);
   });
 });
