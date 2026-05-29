@@ -1,0 +1,183 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+import { createLogger } from '@archon/paths';
+
+import type {
+  IAgentProvider,
+  MessageChunk,
+  ProviderCapabilities,
+  SendQueryOptions,
+} from '../../types';
+import { CLAUDE_BG_CAPABILITIES } from './capabilities';
+import { parseClaudeBgConfig } from './config';
+import { buildClaudeBgArgs } from './invocation';
+import { classifyJobState, parseBackgroundedId, readJobState } from './state';
+
+const execFileAsync = promisify(execFile);
+
+const DEFAULT_POLL_INTERVAL_MS = 4000;
+const VERIFY_DELAY_MS = 2000;
+const BG_BLOCKED_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']);
+
+let cachedLog: ReturnType<typeof createLogger> | undefined;
+function getLog(): ReturnType<typeof createLogger> {
+  if (!cachedLog) cachedLog = createLogger('provider.claude-bg');
+  return cachedLog;
+}
+
+/**
+ * Injectable side-effecting dependencies. Production uses the real
+ * implementations below; tests pass scripted fakes (no subprocess, no timers).
+ */
+export interface ClaudeBgDeps {
+  run: (
+    args: string[],
+    opts: { cwd: string; env?: NodeJS.ProcessEnv }
+  ) => Promise<{
+    stdout: string;
+    stderr: string;
+  }>;
+  stop: (id: string) => Promise<void>;
+  readState: (id: string) => Promise<unknown>;
+  sleep: (ms: number) => Promise<void>;
+}
+
+function defaultDeps(binary: string): ClaudeBgDeps {
+  return {
+    run: async (args, opts): Promise<{ stdout: string; stderr: string }> => {
+      const { stdout, stderr } = await execFileAsync(binary, args, {
+        cwd: opts.cwd,
+        env: opts.env,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      return { stdout, stderr };
+    },
+    stop: async (id): Promise<void> => {
+      await execFileAsync(binary, ['stop', id]).catch(() => undefined);
+    },
+    readState: id => readJobState(id),
+    sleep: ms => new Promise(r => setTimeout(r, ms)),
+  };
+}
+
+/**
+ * claude-bg provider: invokes Claude by dispatching a `claude --bg` background
+ * session and polling ~/.claude/jobs/<id>/state.json to completion.
+ * Subscription-billed (SDK / `claude -p` move to the capped Agent SDK credit
+ * pool on 2026-06-15; `--bg` stays on interactive billing). Batch only — no
+ * live structured streaming; observe via `claude attach` / `claude agents`.
+ */
+export class ClaudeBgProvider implements IAgentProvider {
+  private readonly injectedDeps?: ClaudeBgDeps;
+
+  constructor(deps?: ClaudeBgDeps) {
+    this.injectedDeps = deps;
+  }
+
+  getType(): string {
+    return 'claude-bg';
+  }
+
+  getCapabilities(): ProviderCapabilities {
+    return CLAUDE_BG_CAPABILITIES;
+  }
+
+  async *sendQuery(
+    prompt: string,
+    cwd: string,
+    resumeSessionId?: string,
+    options?: SendQueryOptions
+  ): AsyncGenerator<MessageChunk> {
+    const defaults = parseClaudeBgConfig(options?.assistantConfig ?? {});
+    const nodeConfig = options?.nodeConfig;
+    const binary = defaults.claudeBinaryPath ?? 'claude';
+    const pollIntervalMs = defaults.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const deps = this.injectedDeps ?? defaultDeps(binary);
+
+    const agentNames = nodeConfig?.agents ? Object.keys(nodeConfig.agents) : [];
+    const agent = agentNames[0] ?? defaults.defaultAgent;
+
+    const systemPrompt =
+      typeof options?.systemPrompt === 'string' ? options.systemPrompt : undefined;
+
+    const args = buildClaudeBgArgs({
+      prompt,
+      nodeId: nodeConfig?.nodeId,
+      model: options?.model ?? defaults.model,
+      resumeSessionId,
+      agent,
+      systemPrompt,
+      allowedTools: nodeConfig?.allowed_tools,
+      deniedTools: nodeConfig?.denied_tools,
+      mcpConfigPath: typeof nodeConfig?.mcp === 'string' ? nodeConfig.mcp : undefined,
+      effort: nodeConfig?.effort,
+    });
+
+    // Strip API-key vars from the dispatch env — any of them disables --bg (spec §7).
+    // Applied even to inherited process.env, since the host may have one set.
+    const mergedEnv = options?.env ? { ...process.env, ...options.env } : { ...process.env };
+    const env: NodeJS.ProcessEnv = Object.fromEntries(
+      Object.entries(mergedEnv).filter(([k]) => !BG_BLOCKED_ENV_KEYS.has(k))
+    );
+
+    // 1. Dispatch
+    const { stdout } = await deps.run(args, { cwd, env });
+    const id = parseBackgroundedId(stdout);
+    if (!id) {
+      throw new Error(`claude --bg did not return a session id. stdout: ${stdout.slice(0, 200)}`);
+    }
+    getLog().info({ id, cwd }, 'provider.claude-bg.dispatch_started');
+
+    // 2. Verify launch survived the precheck. The "backgrounded · <id>" line is
+    // printed before the precheck runs; a precheck failure leaves no state file.
+    await deps.sleep(VERIFY_DELAY_MS);
+    let verifyState = await deps.readState(id);
+    if (verifyState === null) {
+      await deps.sleep(VERIFY_DELAY_MS);
+      verifyState = await deps.readState(id);
+      if (verifyState === null) {
+        getLog().error({ id }, 'provider.claude-bg.never_spawned');
+        throw new Error(`claude --bg session ${id} never spawned (no state file written)`);
+      }
+    }
+    if (classifyJobState(verifyState) === 'failed') {
+      getLog().error({ id }, 'provider.claude-bg.verify_failed');
+      throw new Error(`claude --bg session ${id} failed during launch (retryable)`);
+    }
+
+    // 3. Poll to a terminal state
+    for (;;) {
+      if (options?.abortSignal?.aborted) {
+        getLog().warn({ id }, 'provider.claude-bg.aborted');
+        await deps.stop(id);
+        throw new Error(`claude --bg session ${id} aborted`);
+      }
+      const klass = classifyJobState(await deps.readState(id));
+      if (klass === 'completed') {
+        getLog().info({ id }, 'provider.claude-bg.completed');
+        yield { type: 'result', sessionId: id, isError: false };
+        return;
+      }
+      if (klass === 'failed') {
+        getLog().error({ id }, 'provider.claude-bg.failed');
+        yield {
+          type: 'result',
+          sessionId: id,
+          isError: true,
+          errorSubtype: 'error_during_execution',
+        };
+        return;
+      }
+      if (klass === 'stalled') {
+        getLog().error({ id }, 'provider.claude-bg.stalled');
+        throw new Error(
+          `claude --bg session ${id} is blocked awaiting input with no operator — ` +
+            'broaden the repo .claude/settings.json allowlist (spec §6/§7)'
+        );
+      }
+      yield { type: 'system', content: '' };
+      await deps.sleep(pollIntervalMs);
+    }
+  }
+}
