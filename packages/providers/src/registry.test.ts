@@ -257,6 +257,7 @@ describe('registry', () => {
       expect(isRegisteredProvider('opencode')).toBe(true);
       expect(isRegisteredProvider('pi')).toBe(true);
       expect(isRegisteredProvider('copilot')).toBe(true);
+      expect(isRegisteredProvider('claude-bg')).toBe(true);
     });
 
     test('is idempotent', () => {
@@ -265,9 +266,11 @@ describe('registry', () => {
       const opencodeCount = getRegisteredProviders().filter(p => p.id === 'opencode').length;
       const piCount = getRegisteredProviders().filter(p => p.id === 'pi').length;
       const copilotCount = getRegisteredProviders().filter(p => p.id === 'copilot').length;
+      const claudeBgCount = getRegisteredProviders().filter(p => p.id === 'claude-bg').length;
       expect(opencodeCount).toBe(1);
       expect(piCount).toBe(1);
       expect(copilotCount).toBe(1);
+      expect(claudeBgCount).toBe(1);
     });
   });
 
